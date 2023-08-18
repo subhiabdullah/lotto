@@ -1,0 +1,312 @@
+import random
+import numpy as np
+from collections import Counter
+from statistics import mean, median, mode
+from keras.models import Sequential
+from keras.layers import Dense
+import logging
+import unittest
+import matplotlib.pyplot as plt
+from keras.models import load_model
+import os
+import requests
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+import time
+import json
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
+
+
+logging.basicConfig(level=logging.INFO)
+
+BASE_URL = 'https://www.eurojackpot-zahlen.eu/eurojackpot-zahlenarchiv.php'
+YEAR_LIMIT = 10
+
+def click_cookie_button(browser):
+    try:
+        wait = WebDriverWait(browser, 10)
+        cookie_button = wait.until(EC.element_to_be_clickable((By.XPATH, '//input[@class="cc_sub_button" and @type="submit" and @name="submit_cookie_consent" and @value="AKZEPTIEREN"]')))
+        cookie_button.click()
+        logging.info('Cookie-Button erfolgreich geklickt.')
+    except (NoSuchElementException, TimeoutException) as e:
+        logging.error(f'Error with cookie button: {e}. Continuing without clicking it.')
+
+def extract_draws_from_page(browser):
+    draws = []
+    for year in range(2023, 2013, -1):
+        try:
+            h2_tag = browser.find_element(By.XPATH, f"//h2[contains(text(), 'EuroJackpot Zahlenarchiv {year}')]")
+            table = h2_tag.find_element(By.XPATH, "./following-sibling::table[1]")
+            rows = table.find_elements(By.TAG_NAME, "tr")
+            for row in rows:
+                columns = row.find_elements(By.TAG_NAME, "td")
+                draw_data = [col.text for col in columns]
+                draws.append(draw_data)
+        except NoSuchElementException:
+            logging.warning(f"Couldn't find data for the year {year}. Skipping...")
+    return draws
+
+def main():
+    CHROME_DRIVER_PATH = 'C:\\Users\\subhe\\Downloads\\chromedriver-win64\\chromedriver-win64\\chromedriver.exe'
+    options = webdriver.ChromeOptions()
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-extensions")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+    browser = webdriver.Chrome(service=Service(CHROME_DRIVER_PATH), options=options)
+
+    all_draws = []
+    current_year = int(time.strftime('%Y'))
+
+    try:
+        for year in range(current_year, current_year - YEAR_LIMIT, -1):
+            logging.info(f'Fetching data for the year {year}...')
+            browser.get(f'{BASE_URL}?jahr={year}')
+            click_cookie_button(browser)
+            all_draws.extend(extract_draws_from_page(browser))
+    except Exception as e:
+        logging.error(f'Error during web scraping: {e}')
+    finally:
+        browser.quit()
+
+    if not all_draws:
+        logging.error('No data was extracted. Exiting.')
+        return
+
+    try:
+        with open('eurojackpot_data_10_years.json', 'w') as jsonfile:
+            json.dump(all_draws, jsonfile, indent=4)
+            logging.info('Data saved to eurojackpot_data_10_years.json')
+    except Exception as e:
+        logging.error(f'Error while writing to file: {e}')
+
+
+
+class LotteryPredictor:
+    
+    def __init__(self, draws, nn_epochs=100, model_path="lottery_model.h5"):
+        self.draws = draws
+
+
+    def analyze_draw(self, draw):
+        return {
+            "mean": mean(draw),
+            "median": median(draw),
+            "mode": self.safe_mode(draw),
+            "frequencies": self.number_frequencies(draw)
+        }
+
+    def safe_mode(self, data):
+        try:
+            return mode(data)
+        except:
+            return "No unique mode"
+
+    def number_frequencies(self, draw):
+        return dict(Counter(draw))
+
+    def most_common(self):
+        common_numbers = self.counter.most_common(6)
+        prediction = [num for num, _ in common_numbers]
+        explanation = "Most common numbers"
+        return prediction, explanation
+
+    def least_common(self):
+        common_numbers = self.counter.most_common()[:-7:-1]
+        prediction = [num for num, _ in common_numbers]
+        explanation = "Least common numbers"
+        return prediction, explanation
+    
+    
+    
+    
+    def normalize_data(self, data):
+        max_val = max(self.get_all_numbers())  # Änderung hier
+        min_val = min(self.get_all_numbers())  # Änderung hier
+        return [(x - min_val) / (max_val - min_val) for x in data]
+
+    def neural_network(self):
+        for idx, draw in enumerate(self.draws):
+            if not isinstance(draw, list) or len(draw) != 7:
+                print(f"Error in draw {idx}: {draw}")
+        self.draws = [list(draw) for draw in self.draws]
+        # Filtern Sie nur die Zeichnungen, die genau 7 Zahlen haben
+        filtered_draws = [draw for draw in self.draws if len(draw) == 7]
+        X = np.array(filtered_draws)[:, :5]
+
+        print("Shape of X:", X.shape)
+        print(X)
+        # Verwenden Sie die bereits gefilterten Zeichnungen
+        y = np.array(filtered_draws)[:, 5:]
+
+
+        
+        # Normalize data
+        X = self.normalize_data(X)
+        y = self.normalize_data(y)
+        
+        model = Sequential()
+        model.add(Dense(10, input_dim=5, activation='relu'))  # Eingabegröße von 5
+        model.add(Dense(5, activation='relu'))
+        model.add(Dense(2, activation='linear'))  # Ausgabegröße von 2
+
+        model.compile(optimizer='adam', loss='mean_squared_error')
+
+        try:
+            model.fit(X, y, epochs=100, verbose=0)
+        except Exception as e:
+            logging.error(f"Error during model training: {e}")
+            return [], "Error during prediction"
+        
+        last_draw = np.array(self.draws[-1])[:5]
+        normalized_last_draw = self.normalize_data(last_draw)
+        
+        try:
+            prediction = model.predict(np.array([normalized_last_draw]))[0].astype(int).tolist()
+        except Exception as e:
+            logging.error(f"Error during prediction: {e}")
+            return [], "Error during prediction"
+        
+        explanation = "Neural network prediction"
+        return prediction, explanation
+    
+    def get_all_numbers(self):
+        """Returns a flattened list of all numbers from the draws."""
+        return [num for draw in self.draws for num in draw]
+    
+
+    # ... [rest of the methods]
+
+    def evaluate_model(self, test_draws):
+        """Evaluates the neural network model using test data."""
+        X_train = np.array(self.draws)[:, :5]
+        y_train = np.array(self.draws)[:, 5:]
+        X_test = np.array(test_draws)[:, :5]
+        y_test = np.array(test_draws)[:, 5:]
+
+        # Normalize data
+        X_train = self.normalize_data(X_train)
+        y_train = self.normalize_data(y_train)
+        X_test = self.normalize_data(X_test)
+        y_test = self.normalize_data(y_test)
+
+        model = Sequential()
+        model.add(Dense(10, input_dim=5, activation='relu'))
+        model.add(Dense(5, activation='relu'))
+        model.add(Dense(2, activation='linear'))
+        model.compile(loss='mean_squared_error', optimizer='adam')
+        model.fit(X_train, y_train, epochs=self.nn_epochs, verbose=0)
+
+        loss = model.evaluate(X_test, y_test, verbose=0)
+        return loss
+
+    def plot_number_frequencies(self):
+        """Plots the frequency of each number in the draws."""
+        frequencies = self.number_frequencies(self.get_all_numbers())  # Änderung hier
+        plt.bar(frequencies.keys(), frequencies.values())
+        plt.xlabel('Number')
+        plt.ylabel('Frequency')
+        plt.title('Number Frequencies in Draws')
+        plt.show()
+        
+    def __init__(self, draws, nn_epochs=100, model_path="lottery_model.h5"):
+     self.draws = draws
+     for draw in self.draws:
+        if len(draw) != 7:
+            raise ValueError(f"Invalid draw length: {draw}")
+        # ... [rest of the initialization]
+
+    # ... [rest of the methods]
+
+    def save_model(self):
+        """Saves the trained neural network model to a file."""
+        model = self._train_neural_network()
+        model.save(self.model_path)
+
+    def load_model(self):
+        """Loads the neural network model from a file."""
+        if os.path.exists(self.model_path):
+            return load_model(self.model_path)
+        else:
+            print(f"No model found at {self.model_path}. Training a new one...")
+            return self._train_neural_network()
+
+    def _train_neural_network(self):
+        """Private method to train the neural network."""
+        X = np.array(self.draws)[:, :5]
+        y = np.array(self.draws)[:, 5:]
+
+        # Normalize data
+        X = self.normalize_data(X)
+        y = self.normalize_data(y)
+
+        model = Sequential()
+        model.add(Dense(10, input_dim=5, activation='relu'))
+        model.add(Dense(5, activation='relu'))
+        model.add(Dense(2, activation='linear'))
+        model.compile(loss='mean_squared_error', optimizer='adam')
+        model.fit(X, y, epochs=self.nn_epochs, verbose=0)
+        model.compile(optimizer='adam', loss='mean_squared_error')
+
+        return model
+    
+    
+    def future_predictions(self, num_predictions):
+        vorhersagen = []
+        if len(self.draws) < 1:
+            print("Error: No draws available for predictions.")
+            return vorhersagen
+
+        for _ in range(num_predictions):
+            letzte_ziehung = self.draws[-1][:5]
+            vorhergesagte_zahlen, _ = self.neural_network()
+            if len(vorhergesagte_zahlen) != 2:
+                print("Error: Neural network did not provide 2 predicted numbers.")
+                return vorhersagen
+
+        vorhersagen.append(letzte_ziehung + vorhergesagte_zahlen)
+        self.draws.append(letzte_ziehung + vorhergesagte_zahlen)
+        return vorhersagen
+
+
+if __name__ == "__main__":
+    main()
+
+    with open('eurojackpot_data_10_years.json', 'r') as jsonfile:
+        draws_data = json.load(jsonfile)
+    
+    draws = [draw['numbers'] + draw['euro_numbers'] for draw in draws_data]
+    print("Number of loaded draws:", len(draws))
+    print("First 5 draws:", draws[:5])
+
+    predictor = LotteryPredictor(draws)
+
+    action = input("What would you like to do? (analyze/predict/plot/exit): ")
+    while action != "exit":
+        if action == "analyze":
+            for draw in draws:
+                analysis = predictor.analyze_draw(draw)
+                print(f"Draw: {draw}")
+                for key, value in analysis.items():
+                    print(f"{key.capitalize()}: {value}")
+                print("-" * 40)
+        elif action == "predict":
+            future_draws = predictor.future_predictions(10)
+            for idx, prediction in enumerate(future_draws, start=1):
+                print(f"Prediction {idx}: {prediction}")
+            print("-" * 40)
+        elif action == "plot":
+            predictor.plot_number_frequencies()
+        else:
+            print("Invalid action. Please choose from (analyze/predict/plot/exit).")
+
+        action = input("What would you like to do next? (analyze/predict/plot/exit): ")
+
+    print("Goodbye!")
+    
+    
